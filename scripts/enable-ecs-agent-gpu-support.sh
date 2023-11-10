@@ -1,8 +1,41 @@
 #!/usr/bin/env bash
 set -ex
 
-if [[ $AMI_TYPE != "al2gpu" && $AMI_TYPE != "al2keplergpu" ]]; then
+if [[ $AMI_TYPE != "al2gpu" && $AMI_TYPE != "al2keplergpu" && AMI_TYPE != "opengpu" ]]; then
     exit 0
+fi
+
+if [[ $AMI_TYPE == "nvidiaopen" ]]; then
+    sudo yum install -y yum-plugin-versionlock \
+        yum-utils
+    sudo amazon-linux-extras install epel -y
+
+    # disable amzn2 in favor of rh repo
+    sudo yum-config-manager --disable amzn2-nvidia
+    sudo yum-config-manager --add-repo=https://developer.download.nvidia.com/compute/cuda/repos/rhel7/x86_64/cuda-rhel7.repo
+    sudo yum-config-manager --enable cuda-rhel7.repo
+
+    # install open dkms from rh repo
+    sudo yum install -y kmod-nvidia-open-dkms \
+        nvidia-kmod-common
+
+    # build nvidia-open kmod tar
+    DKMS=/usr/sbin/dkms
+    DKMS_ARCHIVE_DIR=/var/lib/dkms-archive
+    MODULE_NAME="nvidia-open"
+    MODULE_VERSION=$(${DKMS} status -m ${MODULE_NAME} | awk '{print $2}' | tr -d ',:')
+
+    sudo ${DKMS} build -m "${MODULE_NAME}" -v "${MODULE_VERSION}"
+    sudo ${DKMS} mktarball -m "${MODULE_NAME}" -v "${MODULE_VERSION}"
+    sudo mkdir -p "${DKMS_ARCHIVE_DIR}/${MODULE_NAME}/"
+    sudo cp /var/lib/dkms/${MODULE_NAME}/${MODULE_VERSION}/tarball/*.tar.gz "${DKMS_ARCHIVE_DIR}/${MODULE_NAME}/"
+
+    # re-enable amzn2 and clean up
+    sudo yum remove kmod-nvidia-open-dkms
+    sudo yum-config-manager --disable cuda-rhel7.repo
+    sudo rm /etc/yum.repos.d/cuda-rhel7.repo
+    sudo rm -rf /var/cache/yum
+    sudo yum-config-manager --enable amzn2-nvidia
 fi
 
 GPG_CHECK=1
@@ -63,6 +96,19 @@ else
     sudo yum install -y cuda-drivers \
         cuda
 fi
+
+if [[ $AMI_TYPE == "nvidiaopen" ]]; then
+    # remove closed-source nvidia kernel module
+    MODULE_NAME="nvidia"
+    MODULE_VERSION=$(${DKMS} status -m ${MODULE_NAME} | awk '{print $2}' | tr -d ',:')
+    sudo ${DKMS} remove -m "${MODULE_NAME}" -v "${MODULE_VERSION}" --all
+
+    # load open module from tarball
+    MODULE_NAME="nvidia-open"
+    MODULE_ARCHIVE="${DKMS_ARCHIVE_DIR}/${MODULE_NAME}/*.tar.gz"
+    sudo ${DKMS} ldtarball ${MODULE_ARCHIVE}
+fi
+
 # The Fabric Manager service needs to be started and enabled on EC2 P4d instances
 # in order to configure NVLinks and NVSwitches
 sudo systemctl enable nvidia-fabricmanager
